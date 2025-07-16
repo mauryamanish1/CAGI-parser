@@ -389,9 +389,9 @@
 #                 csv_content_bytes = csv_buffer.getvalue().encode('utf-8')
 
 #                 st.download_button(
-#                     label="⬇️ Download all_fixspeed_models_rev1.csv",
+#                     label="⬇️ Download extracted_cagi_compilation.csv",
 #                     data=csv_content_bytes,
-#                     file_name="all_fixspeed_models_rev1.csv",
+#                     file_name="extracted_cagi_compilation.csv",
 #                     mime="text/csv",
 #                     help="Click to download the final processed data as a CSV file."
 #                 )
@@ -658,9 +658,9 @@ def concatenate_fields(row):
 def app():
     st.set_page_config(layout="centered", page_title="Excel Data Extractor")
 
-    st.title("📄 Excel Data Extractor for Fixed Speed Models")
+    st.title("📄 Excel Data compiler for Fixed Speed Models")
     st.markdown("""
-        Upload Excel datasheets, and this app will extract and transform specific performance data
+        Upload Excel datasheets which contain fix speed compressors datasheet, and this app will extract and transform specific performance data
         into a structured CSV file for download.
     """)
 
@@ -821,9 +821,9 @@ def app():
                 csv_content_bytes = csv_buffer.getvalue().encode('utf-8')
 
                 st.download_button(
-                    label="⬇️ Download all_fixspeed_models_rev1.csv",
+                    label="⬇️ Download extracted_cagi_compilation.csv",
                     data=csv_content_bytes,
-                    file_name="all_fixspeed_models_rev1.csv",
+                    file_name="extracted_cagi_compilation.csv",
                     mime="text/csv",
                     help="Click to download the final processed data as a CSV file."
                 )
