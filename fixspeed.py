@@ -331,8 +331,8 @@ def app():
                 # Concatenate all extracted DataFrames
                 final_extracted_df = pd.concat(all_extracted_dfs, ignore_index=True)
 
-                st.subheader("Extracted Data Preview (Initial):")
-                st.dataframe(final_extracted_df.head())
+                # st.subheader("Extracted Data Preview (Initial):")
+                # st.dataframe(final_extracted_df.head())
 
                 # Apply the additional processing steps from the notebook (Working_pressure, concatenated_field)
                 # Ensure 'Model' column is string type before rsplit
