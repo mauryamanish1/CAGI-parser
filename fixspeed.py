@@ -245,7 +245,7 @@
 
 
 # def app():
-#     st.set_page_config(layout="centered", page_title="Excel Data Extractor")
+#     st.set_page_config(layout="wide", page_title="Excel Data Extractor")
 
 #     st.title("📄 Excel Data Extractor for Fixed Speed Models")
 #     st.markdown("""
@@ -656,7 +656,7 @@ def concatenate_fields(row):
 
 
 def app():
-    st.set_page_config(layout="centered", page_title="Excel Data Extractor")
+    st.set_page_config(layout="wide", page_title="Excel Data Extractor")
 
     st.title("📄 Excel Data compiler for Fixed Speed Models")
     st.markdown("""
