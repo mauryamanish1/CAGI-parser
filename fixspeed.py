@@ -307,9 +307,23 @@ def app():
             status_text.empty()
 
             if all_processing_errors:
-                st.warning("Issues were encountered during processing. Please review the messages below:")
-                for error_msg in all_processing_errors:
-                    st.error(error_msg)
+                st.warning("Some errors occurred during processing. Please download the error log for details.")
+                # Create a DataFrame for errors
+                errors_df = pd.DataFrame({"Timestamp": [datetime.now()] * len(all_processing_errors),
+                                          "Error Message": all_processing_errors})
+                
+                # Convert error DataFrame to CSV for download
+                error_csv_buffer = io.StringIO()
+                errors_df.to_csv(error_csv_buffer, index=False)
+                error_csv_content_bytes = error_csv_buffer.getvalue().encode('utf-8')
+
+                st.download_button(
+                    label="⬇️ Download Error Log (CSV)",
+                    data=error_csv_content_bytes,
+                    file_name="processing_error_log.csv",
+                    mime="text/csv",
+                    help="Click to download a CSV file containing all processing errors."
+                )
             
             if all_extracted_dfs:
                 st.success("Data extraction complete! Applying final transformations...")
@@ -317,8 +331,8 @@ def app():
                 # Concatenate all extracted DataFrames
                 final_extracted_df = pd.concat(all_extracted_dfs, ignore_index=True)
 
-                # st.subheader("Extracted Data Preview (Initial):")
-                # st.dataframe(final_extracted_df.head())
+                st.subheader("Extracted Data Preview (Initial):")
+                st.dataframe(final_extracted_df.head())
 
                 # Apply the additional processing steps from the notebook (Working_pressure, concatenated_field)
                 # Ensure 'Model' column is string type before rsplit
