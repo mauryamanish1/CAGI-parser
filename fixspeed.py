@@ -1,0 +1,365 @@
+import streamlit as st
+import pandas as pd
+import re
+from datetime import datetime
+import io
+
+def process_excel_file(df_uploaded, file_name):
+    """
+    Processes a single pandas DataFrame (from an uploaded Excel file)
+    according to the logic provided in the notebook code.
+    Returns the processed DataFrame and any error messages.
+    """
+    compiled_results = []
+    error_logs = []
+
+    # ==== Step 1: Prepare Identifiers ====
+    # (A) Only text match needed
+    simple_identifiers = [
+        'no load',
+        'Male rotor speed',
+        'Nominal motor rating',
+        'Drive motor speed',
+        'Fan motor rating'
+    ]
+    simple_identifiers = [id_.strip().lower() for id_ in simple_identifiers]
+
+    # (B) Text + Unit match needed
+    unit_identifiers = [
+        ('5 bar', 'm3/min'), ('5 bar', 'KW'), ('6 bar', 'm3/min'), ('6 bar', 'KW'),
+        ('7 bar', 'm3/min'), ('7 bar', 'KW'), ('7.5 bar', 'm3/min'), ('7.5 bar', 'KW'),
+        ('8 bar', 'm3/min'), ('8 bar', 'KW'), ('9 bar', 'm3/min'), ('9 bar', 'KW'),
+        ('10 bar', 'm3/min'), ('10 bar', 'KW'), ('11 bar', 'm3/min'), ('11 bar', 'KW'),
+        ('', 'kW'), # Note: This is for a standalone 'kW' unit
+        ('Performance Data', 'Performance Data'), # Special case for header
+        ('Performance Data', 'bar g'), # Special case for header
+        ('Maximum working pressure', 'bar g') # Special case for header
+    ]
+    unit_identifiers = [(i[0].strip().lower(), i[1].strip().lower()) for i in unit_identifiers]
+
+    try:
+        df = df_uploaded.copy() # Work on a copy of the uploaded DataFrame
+        
+        # Initial check for empty or too few rows
+        if df.empty or len(df) < 5:
+            raise ValueError("Empty or too few rows in the uploaded file. Minimum 5 rows required.")
+
+        # === 1. Cooling Media detection FIRST ===
+        # Convert top 15 rows to string and lowercase for robust searching
+        top_rows_raw = df.head(15).astype(str).apply(lambda x: x.str.lower())
+
+        cooling_media = 'Unknown'
+        if top_rows_raw.apply(lambda x: x.str.contains('water', na=False).any()).any():
+            cooling_media = 'W'
+        elif top_rows_raw.apply(lambda x: x.str.contains('air', na=False).any()).any():
+            cooling_media = 'A'
+
+        # Detect Hz value (50 or 60 Hz)
+        hz_value = None
+        # Iterate through all cell values in the top rows
+        for cell_value in top_rows_raw.values.flatten():
+            match = re.search(r'\b(50|60)\s*hz\b', str(cell_value), re.IGNORECASE)
+            if match:
+                hz_value = int(match.group(1)) # Extract 50 or 60
+                break
+
+        # Drop columns where the value in the 5th row (index 4) is NaN
+        # This assumes the 5th row (index 4) is crucial for identifying valid data columns
+        cols_to_drop = [col for col in df.columns[1:] if pd.isna(df.loc[4, col])]
+        df_cleaned = df.drop(columns=cols_to_drop)
+
+        # Detect date row using multiple patterns
+        date_patterns = [
+            r'\d{4}-\d{2}-\d{2}', r'\d{2}/\d{2}/\d{4}', r'\d{2}\.\d{2}\.\d{4}',
+            r'\d{4}/\d{2}/\d{2}', r'\b\d{1,2}[ ]?[A-Za-z]{3,9}[ ]?\d{4}\b',
+            r'\b[A-Za-z]{3,9}[ ]?\d{1,2},?[ ]?\d{4}\b'
+        ]
+        combined_pattern = '|'.join(date_patterns)
+        # Check each row if any cell contains a date pattern
+        date_row_mask = df_cleaned.apply(lambda row: row.astype(str).str.contains(combined_pattern, regex=True, case=False, na=False).any(), axis=1)
+
+        if not date_row_mask.any():
+            raise ValueError("No date row found in the uploaded file. Please ensure a date is present in a row.")
+        date_row_index = df_cleaned[date_row_mask].index[0] # Get the index of the first row containing a date
+
+        original_row = df_cleaned.loc[date_row_index].copy()
+        # Create a 'cleaned' version of the date row, masking out the date string itself
+        cleaned_row = original_row.mask(original_row.astype(str).str.contains(r'\d{4}-\d{2}-\d{2}'))
+        # Concatenate this 'cleaned' row back to the DataFrame.
+        # This part of the original notebook code is a bit unusual but maintained for consistency.
+        df_cleaned = pd.concat([df_cleaned, pd.DataFrame([cleaned_row], columns=df_cleaned.columns)], ignore_index=True)
+
+        # Extract actual date objects from the original date row
+        date_strings = original_row[original_row.astype(str).str.contains(r'\d{4}-\d{2}-\d{2}')].astype(str)
+        date_objects = pd.to_datetime(date_strings, errors='coerce').dropna().tolist()
+
+        # Forward fill specific rows for data propagation
+        # Ensure indices exist before attempting to fill
+        rows_to_fill_indices = [idx for idx in [3, 5, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, df_cleaned.index[-1]] if idx in df_cleaned.index]
+        if rows_to_fill_indices:
+            df_cleaned.loc[rows_to_fill_indices] = df_cleaned.loc[rows_to_fill_indices].ffill(axis=1)
+        # Forward fill the first column (index 0)
+        df_cleaned.iloc[:, 0] = df_cleaned.iloc[:, 0].ffill()
+
+        # Build new header by concatenating values from row 3 and row 4
+        # This assumes row 3 and 4 contain parts of the desired column names
+        new_row_for_header = (df_cleaned.iloc[3].astype(str) + '_' + df_cleaned.iloc[4].astype(str))
+        # Add this new header row to the end of the DataFrame temporarily
+        df_cleaned.loc[df_cleaned.index.max() + 1] = new_row_for_header
+        final_df = df_cleaned.copy()
+        # Set the last row as the new column headers
+        new_header = final_df.iloc[-1]
+        # Remove the last row (which is now the header) from the DataFrame body
+        final_df = final_df.iloc[:-1]
+        # Assign the new headers to the DataFrame
+        final_df.columns = new_header
+
+        # Find data columns by looking for unit keywords in the new header
+        unit_keywords = ['kw', 'm3/min', 'rpm', 'bar', 'bar g']
+        last_unit_col_index = -1
+        # Iterate through the new column names (converted to string for safety)
+        for i, col_name in enumerate(final_df.columns.astype(str)):
+            # Check if any unit keyword is present in the column name (case-insensitive)
+            if any(keyword in col_name.lower() for keyword in unit_keywords):
+                last_unit_col_index = i
+        
+        if last_unit_col_index == -1:
+            raise ValueError("No unit keywords found in the generated header. Cannot identify data columns.")
+
+        # Data columns are considered to be after the last column containing a unit keyword
+        data_cols = final_df.columns[last_unit_col_index + 1:]
+        if data_cols.empty:
+            raise ValueError("No data columns identified after processing headers.")
+
+        # ==== Step 3: Extraction per model (for each data column) ====
+        output_rows = []
+        for col in data_cols:
+            row_data = {'Source File': file_name, 'Model': col, 'date_revised': date_objects}
+            row_data['Cooling Media'] = cooling_media
+            row_data['Hz'] = hz_value
+
+            # (A) Simple text-only fields extraction
+            for id_0 in simple_identifiers:
+                match_col = None
+                # Search for the identifier in the first 3 columns
+                for i in range(3):
+                    if i < final_df.shape[1] and final_df.iloc[:, i].astype(str).str.strip().str.contains(id_0, case=False, na=False).any():
+                        match_col = i
+                        break
+                
+                value = 'not found'
+                if match_col is not None:
+                    # Create a boolean mask for rows where the identifier is found
+                    mask = final_df.iloc[:, match_col].astype(str).str.strip().str.contains(id_0, case=False, na=False)
+                    # Filter the DataFrame using the mask
+                    match = final_df[mask]
+                    # Get the value from the current 'col' (model column) if found
+                    if not match.empty and col in match.columns:
+                        value = match[col].values[0]
+                
+                display_key = id_0.title() # Convert identifier to title case for the column name
+                row_data[display_key] = value
+
+            # (B) Fields needing text + unit match extraction
+            for id_0, id_2 in unit_identifiers:
+                match_0 = match_2 = None
+                # Search for the first identifier (id_0) in the first 3 columns
+                for i in range(3):
+                    if i < final_df.shape[1] and final_df.iloc[:, i].astype(str).str.strip().str.contains(id_0, case=False, na=False).any():
+                        match_0 = i
+                        break
+                # Search for the second identifier (id_2) in the first 3 columns, excluding the column where id_0 was found
+                for i in range(3):
+                    if i < final_df.shape[1] and i != match_0 and final_df.iloc[:, i].astype(str).str.strip().str.contains(id_2, case=False, na=False).any():
+                        match_2 = i
+                        break
+
+                # Create masks based on whether identifiers were found
+                mask_0 = pd.Series([False] * len(final_df))
+                if match_0 is not None:
+                    mask_0 = final_df.iloc[:, match_0].astype(str).str.strip().str.contains(id_0, case=False, na=False)
+                
+                mask_2 = pd.Series([True] * len(final_df)) # Default to True if no id_2 or no match for id_2
+                if id_2 and match_2 is not None:
+                    mask_2 = final_df.iloc[:, match_2].astype(str).str.strip().str.contains(id_2, case=False, na=False)
+                
+                # Ensure masks have the same length as final_df to prevent alignment issues
+                if len(mask_0) != len(final_df):
+                    mask_0 = pd.Series([False] * len(final_df))
+                if len(mask_2) != len(final_df):
+                    mask_2 = pd.Series([False] * len(final_df))
+
+                # Combine masks to find rows matching both criteria
+                match = final_df[mask_0 & mask_2]
+                value = 'not found'
+                if not match.empty and col in match.columns:
+                    value = match[col].values[0]
+                
+                # Construct display key for the column name
+                display_key = f"{id_0.title()}_{id_2.title()}" if id_2 else id_0.title()
+                row_data[display_key] = value
+
+            output_rows.append(row_data)
+
+        if output_rows:
+            # If data was extracted, create a DataFrame
+            extracted_df = pd.DataFrame(output_rows)
+            compiled_results.append(extracted_df)
+        else:
+            # Log an error if no data was extracted for this file
+            error_logs.append(f"No data extracted for file '{file_name}' after initial processing.")
+
+    except Exception as e:
+        # Catch any exceptions during processing and log them
+        error_logs.append(f"Error processing file '{file_name}': {str(e)}")
+
+    # Return the concatenated results and any accumulated error messages
+    if compiled_results:
+        final_extracted_df = pd.concat(compiled_results, ignore_index=True)
+    else:
+        final_extracted_df = pd.DataFrame() # Return an empty DataFrame if nothing was extracted
+
+    return final_extracted_df, error_logs
+
+def concatenate_fields(row):
+    """
+    Concatenates various fields from a row to create a 'name' column,
+    replicating the logic from the notebook.
+    """
+    model_data = str(row.get('Performance Data_Performance Data', '')).strip()
+    cooling_media = str(row.get('Cooling Media', '')).strip()
+    hz = str(row.get('Hz', ''))
+    hz_suffix = f"({hz} Hz)" if hz else ''
+
+    bar_g = str(row.get('Working_pressure', '')).strip()
+    bar_suffix = (' bar') if bar_g else ''
+
+    # Logic to conditionally add cooling_media based on model_data ending
+    if not model_data.endswith(('A', 'W')):
+        model_data_with_cooling = ' '.join([model_data, cooling_media]) if cooling_media else model_data
+    else:
+        model_data_with_cooling = model_data
+
+    # Join all parts, filtering out empty strings
+    return ' '.join(part for part in [model_data_with_cooling, hz_suffix, bar_g, bar_suffix] if part)
+
+
+def app():
+    st.set_page_config(layout="centered", page_title="Excel Data Extractor")
+
+    st.title("📄 Excel Data Extractor for Fixed Speed Models")
+    st.markdown("""
+        Upload an Excel datasheet, and this app will apply a series of extraction and transformation
+        steps to compile specific performance data into a structured CSV file for download.
+        Ensure your Excel file's structure matches the expected format for accurate extraction.
+    """)
+
+    # File Uploader Widget
+    uploaded_file = st.file_uploader(
+        "Choose an Excel file (.xls, .xlsx)",
+        type=["xls", "xlsx"],
+        help="Select a single Excel file from your local machine to begin processing."
+    )
+
+    if uploaded_file is not None:
+        st.info(f"Processing '{uploaded_file.name}'...")
+        
+        # Read the uploaded Excel file into a pandas DataFrame.
+        # The original notebook code used `header=None`, so we maintain that.
+        try:
+            df_uploaded_raw = pd.read_excel(uploaded_file, header=None)
+        except Exception as e:
+            st.error(f"Error reading the uploaded Excel file: {e}")
+            st.warning("Please ensure the file is a valid Excel format and not corrupted. "
+                       "If the issue persists, try saving the Excel file again.")
+            return # Stop execution if file cannot be read
+
+        # Process the uploaded DataFrame using the notebook's core logic
+        extracted_df, processing_errors = process_excel_file(df_uploaded_raw, uploaded_file.name)
+
+        if processing_errors:
+            st.warning("Issues were encountered during processing. Please review the messages below:")
+            for error_msg in processing_errors:
+                st.error(error_msg)
+            # Continue to show results even with errors, if any data was extracted
+            if extracted_df.empty:
+                st.info("No data could be extracted from the uploaded file based on the defined logic. "
+                        "Please check the file's structure against the expected format.")
+                return # Exit if no data was extracted at all
+
+        if not extracted_df.empty:
+            st.success("Data extraction complete! Applying final transformations...")
+            st.subheader("Extracted Data Preview (Initial):")
+            st.dataframe(extracted_df.head())
+
+            # Apply the additional processing steps from the notebook (Working_pressure, concatenated_field)
+            # Ensure 'Model' column is string type before rsplit
+            extracted_df['Working_pressure'] = extracted_df['Model'].astype(str).str.rsplit('_', n=1).str[-1]
+            extracted_df['concatenated_field'] = extracted_df.apply(concatenate_fields, axis=1)
+
+            # Rename columns as per the notebook
+            all_files_combined = extracted_df.copy()
+            all_files_combined = all_files_combined.rename(columns={
+                '5 Bar_M3/Min': 'Flow Level 1 (5bar)',
+                '6 Bar_M3/Min': 'Flow Level 2 (6bar)',
+                '7 Bar_M3/Min': 'Flow Level 3 (7bar)',
+                '7.5 Bar_M3/Min': 'Flow Level 4 (7.5bar)',
+                '8 Bar_M3/Min': 'Flow Level 5 (8bar)',
+                '9 Bar_M3/Min': 'Flow Level 6 (9bar)',
+                '10 Bar_M3/Min': 'Flow Level 7 (10bar)',
+                '11 Bar_M3/Min': 'Flow Level 8 (11bar)',
+                '5 Bar_Kw': 'Kw Level 1 (5 bar)',
+                '6 Bar_Kw': 'Kw Level 2 (6 bar)',
+                '7 Bar_Kw': 'Kw Level 3 (7 bar)',
+                '7.5 Bar_Kw': 'Kw Level 4 (7.5 bar)',
+                '8 Bar_Kw': 'Kw Level 5 (8 bar)',
+                '9 Bar_Kw': 'Kw Level 6 (9 bar)',
+                '10 Bar_Kw': 'Kw Level 7 (10 bar)',
+                '11 Bar_Kw': 'Kw Level 8 (11 bar)',
+                'No Load': 'Unload Kw',
+                '_Kw' : 'max kw', # This column name might vary based on actual data
+                'Working_pressure':'Maximal Setpoint Pressure',
+                'concatenated_field': 'name',
+                'Performance Data_Performance Data': 'model_code',
+            })
+
+            # Drop specified columns from the notebook.
+            # Use a list comprehension to only drop columns that actually exist in the DataFrame.
+            cols_to_drop_final = ['Performance Data_Bar G', 'Maximum Working Pressure_Bar G']
+            all_files_combined.drop(columns=[col for col in cols_to_drop_final if col in all_files_combined.columns], inplace=True)
+
+            # Add RATED FLOW and MANUFACTURER columns
+            flow_cols = [c for c in all_files_combined.columns if "Flow Level" in c]
+            # Convert flow columns to numeric, coercing errors to NaN
+            all_files_combined[flow_cols] = all_files_combined[flow_cols].apply(pd.to_numeric, errors="coerce")
+            # Calculate min flow across flow level columns
+            all_files_combined["flow_at_maxworking_press"] = all_files_combined[flow_cols].min(axis=1, skipna=True)
+            all_files_combined['kw_at_maxworking_press'] = all_files_combined['max kw']
+            all_files_combined['Manufacturer'] = 'CompAir'
+
+            st.success("All transformations applied successfully!")
+            st.subheader("Final Processed Data Preview (Ready for Download):")
+            st.dataframe(all_files_combined.head())
+
+            # Convert the final DataFrame to CSV format in memory for download
+            csv_buffer = io.StringIO()
+            all_files_combined.to_csv(csv_buffer, index=False)
+            csv_content_bytes = csv_buffer.getvalue().encode('utf-8')
+
+            st.download_button(
+                label="⬇️ Download all_fixspeed_models_rev1.csv",
+                data=csv_content_bytes,
+                file_name="all_fixspeed_models_rev1.csv",
+                mime="text/csv",
+                help="Click to download the final processed data as a CSV file."
+            )
+        else:
+            # This case is primarily for when processing_errors exist and no data was extracted
+            st.warning("No data could be extracted from the uploaded file based on the defined logic. "
+                       "Please ensure the Excel file structure matches the expected format for extraction.")
+
+    else:
+        st.info("Please upload an Excel file to start the data extraction process.")
+
+if __name__ == "__main__":
+    app()
